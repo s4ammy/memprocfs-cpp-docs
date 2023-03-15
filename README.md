@@ -6,8 +6,8 @@ Classes:
 - [c_process](#c_process)
 - [c_memory](#c_memory)
 - [c_registry](#c_registry)
-
 - [structs](#structs)
+- [example](#example)
 
 ## c_device
 class that handles the device
@@ -199,4 +199,123 @@ struct machine_data_t
 	std::string motherboard_manufacturer_name;
 	std::string motherboard_name;
 };
+```
+
+## example
+```cpp
+int main()
+{
+    std::fstream ifs("config.json");
+    if (!ifs.is_open())
+    {
+        printf("[-] failed to open config.json\n");
+        return 0;
+    }
+
+    nlohmann::json j = nlohmann::json::parse(ifs);
+
+    ifs.close();
+
+    bool use_memory_map = (bool)j["use_memory_map"];
+    std::string memory_map_location = (std::string)j["memory_map_location"];
+
+    j.clear();
+
+    std::vector<const char*> args = { "", "-device", "FPGA" };
+    if (use_memory_map)
+    {
+        args.push_back("-memmap");
+        args.push_back(memory_map_location.c_str());
+    }
+
+    c_device device = c_device(args);
+    if (!device.connect())
+        return device.error("[-] failed to connect to device\n");
+    else
+        printf("[+] connected to device, id -> %lli | version -> %lli.%lli\n\n", device.id, device.major_version, device.minor_version);
+
+    machine_data_t machine_data = device.get_machine_data();
+    printf("[+] machine data\n\tcurrent build -> %d\n\tedition -> %s\n\tdisplay version -> %s\n\tprocessor name -> %s\n\tmotherboard manufacturer -> %s\n\tmotherboard model -> %s\n\n", 
+        machine_data.current_build, machine_data.edition.c_str(), machine_data.display_version.c_str(), machine_data.processor_name.c_str(),
+        machine_data.motherboard_manufacturer_name.c_str(), machine_data.motherboard_name.c_str());
+
+    std::vector<user_map_data_t> users = device.get_users();
+    if (users.empty())
+        printf("[-] user list was empty\n");
+    else
+    {
+        printf("[+] user list results\n");
+
+        for (auto& data : users)
+            printf("\t%s\n", data.usz_text);
+    }
+
+    printf("\n");
+
+    c_process process = device.process_from_name("notepad.exe");
+    if (process.failed)
+        return device.error("[-] failed to find notepad\n");
+    else
+        printf("[+] found notepad, process id -> %d\n", process.get_pid());
+
+    module_data_t module_data = process.module_from_name("notepad.exe");
+    if (module_data.failed)
+        return device.error("[-] failed to find notepad module\n");
+    else
+        printf("[+] found notepad module, base -> 0x%llx | size -> 0x%lx\n\n", module_data.base, module_data.size);
+
+    c_memory memory = process.get_memory();
+
+    std::vector<section_data_t> sections = memory.get_sections(CC_TO_LPSTR("notepad.exe"));
+    if (sections.empty())
+        printf("[-] notepad.exe section list was empty\n");
+    else
+    {
+        printf("[+] notepad.exe section list results\n");
+
+        for (auto& data : sections)
+            printf("\tname -> %s | start -> 0x%llx | end -> 0x%llx | characteristics -> %c%c%c\n", data.name, data.start, data.end,
+                (data.characteristics & IMAGE_SCN_MEM_READ) ? 'r' : '-',
+                (data.characteristics & IMAGE_SCN_MEM_WRITE) ? 'w' : '-',
+                (data.characteristics & IMAGE_SCN_MEM_EXECUTE) ? 'x' : '-');
+    }
+    printf("\n");
+
+    uint64_t scan_result = memory.find_signature("48 ? 48 ? 48", module_data.base, module_data.base + module_data.size);
+    uint8_t bytes[3];
+    memory.read_raw(scan_result, &bytes);
+    printf("[+] signature scan result -> 0x%llx | bytes -> 0x%x 0x%x 0x%x\n\n", scan_result, bytes[0], bytes[1], bytes[2]);
+
+    uint64_t string_scan_result = memory.string_scan("Format", module_data.base, module_data.base + module_data.size);
+    printf("[+] string scan for 'Format' result -> 0x%llx\n\n", string_scan_result);
+
+    memory.initialize_scatter();
+
+    for (int i = 0; i < 0x12; i++)
+        memory.prepare_scatter<uint8_t>(module_data.base + i);
+
+    printf("[+] prepared %d items for scatter, dispatching\n", memory.scatters);
+
+    if (memory.dispatch_read())
+    {
+        printf("[+] scatter results\n\t");
+        for (int i = 0; i < 0x12; i++)
+        {
+            uint8_t byte = memory.read_scatter<uint8_t>(module_data.base + 0x200 + i);
+            printf("0x%x ", byte);
+        }
+    }
+    else
+        printf("[-] failed to dispatch read\n");
+
+    memory.uninitialize_scatter();
+
+    printf("\n\n");
+
+    device.disconnect();
+
+    printf("[+] disconnected device\n");;
+
+    std::cin.get();
+}
 ```
